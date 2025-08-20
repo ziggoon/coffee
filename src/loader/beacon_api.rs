@@ -26,6 +26,24 @@ use windows_sys::Win32::{
     System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA},
 };
 
+// For Windows, we'll use the C runtime directly
+extern "C" {
+    fn _vsnprintf_s(
+        buffer: *mut c_char,
+        size_of_buffer: usize,
+        count: usize,
+        format: *const c_char,
+        argptr: core::ffi::VaList,
+    ) -> c_int;
+
+    fn _vsnprintf(
+        buffer: *mut c_char,
+        count: usize,
+        format: *const c_char,
+        argptr: core::ffi::VaList,
+    ) -> c_int;
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Formatp {
@@ -432,7 +450,6 @@ extern "C" fn beacon_format_append(format: *mut Formatp, text: *const c_char, le
 
 /// Append a formatted string to this object.
 #[no_mangle]
-#[allow(clippy::cast_possible_wrap)]
 unsafe extern "C" fn beacon_format_printf(format: *mut Formatp, fmt: *const c_char, mut args: ...) {
     if format.is_null() {
         return;
@@ -440,22 +457,39 @@ unsafe extern "C" fn beacon_format_printf(format: *mut Formatp, fmt: *const c_ch
 
     let mut format_parser: Formatp = *format;
 
-    let mut s = String::new();
-    let bytes_written = printf_compat::format(
+    // Use a buffer large enough for most format operations
+    let mut buffer = vec![0u8; 4096];
+
+    // Use Windows CRT vsnprintf
+    let bytes_written = _vsnprintf(
+        buffer.as_mut_ptr() as *mut c_char,
+        buffer.len() - 1, // Leave space for null terminator
         fmt,
         args.as_va_list(),
-        printf_compat::output::fmt_write(&mut s),
     );
+
+    // Check if the operation was successful
+    if bytes_written < 0 || bytes_written >= buffer.len() as c_int {
+        return;
+    }
 
     if format_parser.length + bytes_written + 1 > format_parser.size {
         return;
     }
 
-    s.push('\0');
+    // Ensure null termination
+    buffer[bytes_written as usize] = 0;
 
-    intrinsics::copy_nonoverlapping(s.as_ptr(), format_parser.buffer.cast::<u8>(), s.len());
+    // Copy the formatted string to the format buffer
+    intrinsics::copy_nonoverlapping(
+        buffer.as_ptr(),
+        format_parser.buffer as *mut u8,
+        bytes_written as usize + 1, // Include null terminator
+    );
 
-    format_parser.length += s.len() as i32;
+    // Update the format parser state
+    format_parser.buffer = format_parser.buffer.add(bytes_written as usize);
+    format_parser.length += bytes_written;
 
     *format = format_parser;
 }
@@ -562,17 +596,29 @@ pub extern "C" fn beacon_get_output_data() -> &'static mut Carrier {
 /// Format and present output to the Beacon operator.
 #[no_mangle]
 unsafe extern "C" fn beacon_printf(_type: c_int, fmt: *mut c_char, mut args: ...) {
-    let mut s = String::new();
+    // Use a buffer large enough for most format operations
+    let mut buffer = vec![0u8; 4096];
 
-    printf_compat::format(
+    // Use Windows CRT vsnprintf
+    let bytes_written = _vsnprintf(
+        buffer.as_mut_ptr() as *mut c_char,
+        buffer.len() - 1,
         fmt,
         args.as_va_list(),
-        printf_compat::output::fmt_write(&mut s),
     );
 
-    s.push('\0');
+    // Check if the operation was successful
+    if bytes_written < 0 || bytes_written >= buffer.len() as c_int {
+        return;
+    }
 
-    OUTPUT.append_string(&s);
+    // Ensure null termination
+    buffer[bytes_written as usize] = 0;
+
+    // Convert buffer to String, but only the written portion
+    let formatted_str = String::from_utf8_lossy(&buffer[..bytes_written as usize]).into_owned();
+
+    OUTPUT.append_string(&formatted_str);
 }
 
 /// Apply the specified token as Beacon's current thread token.
