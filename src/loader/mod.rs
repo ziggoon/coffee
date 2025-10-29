@@ -779,7 +779,7 @@ impl<'a> Coffee<'a> {
                     let entry_name: String = if let Some(entrypoint_name) = entrypoint_name {
                         entrypoint_name.to_string()
                     } else {
-                        "Go".to_string()
+                        "go".to_string()
                         /* _go for 32-bit for whatever reason? */
                     };
 
